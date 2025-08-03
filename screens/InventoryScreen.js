@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,61 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { debounce } from 'lodash'; // Pastikan lodash diinstal: npm install lodash
+import { debounce } from 'lodash';
+import { useFocusEffect } from '@react-navigation/native';
+import { Picker } from '@react-native-picker/picker';
+
+// Komponen untuk item produk dengan memoization
+const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader }) => {
+  if (!item || !item.name || !item.id) {
+    console.warn('Item produk tidak valid:', item);
+    return null;
+  }
+  const brand = item.brand ? item.brand.replace(/['"]/g, '').replace(/\n/g, '') : 'Unknown';
+  const model = item.model ? item.model.replace(/['"]/g, '').replace(/\n/g, '') : '-';
+  const rowNumber = index + 1;
+  const stock = item.stock || 0;
+  const physicalStock = stock;
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(
+    `http://192.168.1.6:8000/inventory/${item.id}`
+  )}`;
+
+  return (
+    <View>
+      {showBrandHeader && (
+        <Text style={styles.brandHeader}>{brand.toUpperCase()}</Text>
+      )}
+      <View style={[styles.item, index % 2 === 0 ? styles.itemEven : styles.itemOdd]}>
+        <Text style={styles.itemText}>{rowNumber}</Text>
+        <View style={styles.itemTextContainer}>
+          <Text style={styles.itemText}>{brand.toUpperCase()}</Text>
+        </View>
+        <Text style={styles.itemText}>{model.toUpperCase()}</Text>
+        <Text style={styles.itemText}>{item.size ? item.size.replace(/['"]/g, '').replace(/\n/g, '') : '-'}</Text>
+        <Text style={styles.itemText}>{item.color ? item.color.replace(/['"]/g, '').replace(/\n/g, '').toUpperCase() : '-'}</Text>
+        <Text style={[styles.itemText, stock < 5 ? styles.lowStock : null]}>{stock}</Text>
+        <Text style={styles.itemText}>{physicalStock}</Text>
+        <Text style={styles.itemText}>Rp {new Intl.NumberFormat('id-ID').format(parseFloat(item.selling_price) || 0)}</Text>
+        <Text style={styles.itemText}>
+          {item.discount_price ? `Rp ${new Intl.NumberFormat('id-ID').format(parseFloat(item.discount_price))}` : '-'}
+        </Text>
+        <Image
+          source={{ uri: qrCodeUrl }}
+          style={styles.qrCode}
+          onError={(e) => console.log(`Gagal memuat QR code untuk produk ${item.id}:`, e.nativeEvent.error)}
+        />
+        <View style={styles.actions}>
+          <TouchableOpacity onPress={() => onEdit(item)}>
+            <Text style={styles.actionText}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => onDelete(item.id)}>
+            <Text style={[styles.actionText, { color: '#d9534f' }]}>Hapus</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+});
 
 export default function InventoryScreen() {
   const [products, setProducts] = useState([]);
@@ -22,133 +76,18 @@ export default function InventoryScreen() {
   const [newItem, setNewItem] = useState({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
   const [editItem, setEditItem] = useState(null);
   const [brandCounts, setBrandCounts] = useState({});
-  const [currentPage, setCurrentPage] = useState(1);
-  const [lastPage, setLastPage] = useState(1);
+  const [selectedBrand, setSelectedBrand] = useState('all');
   const [isLoading, setIsLoading] = useState(false);
-  const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
 
-  // Sanitasi string untuk mencegah unterminated string literal
-  const sanitizeString = (str) => {
+  // Sanitize string
+  const sanitizeString = useCallback((str) => {
     return (str || '').replace(/['"]/g, '').replace(/\n/g, '');
-  };
+  }, []);
 
-  // Debounce search handler
-  const debouncedSearch = useCallback(
-    debounce((search, size) => {
-      if (search.length < 2 && size.length < 1) {
-        Alert.alert('Error', 'Kata kunci brand atau model minimal 2 karakter atau masukkan ukuran.');
-        return;
-      }
-      setCurrentPage(1);
-      setProducts([]);
-      setErrorMessage('');
-      fetchProducts(sanitizeString(search), sanitizeString(size), 1);
-    }, 500),
-    []
-  );
-
-  // Fetch products
-  const fetchProducts = useCallback(async (search = '', size = '', page = 1, append = false) => {
-    if (isLoading || (page !== 1 && isFetchingMore)) return;
-    page === 1 ? setIsLoading(true) : setIsFetchingMore(true);
-
-    try {
-      console.log(`Fetching products: search=${search}, size=${size}, page=${page}, append=${append}`);
-      const cacheKey = `products_${sanitizeString(search)}_${sanitizeString(size)}_${page}`;
-      const cachedData = await AsyncStorage.getItem(cacheKey);
-      if (cachedData) {
-        console.log('Using cached data for:', cacheKey);
-        const { products: cachedProducts, pagination } = JSON.parse(cachedData);
-        setProducts(prev => (append ? [...prev, ...cachedProducts] : cachedProducts));
-        setCurrentPage(pagination.current_page);
-        setLastPage(pagination.last_page);
-        updateBrandCounts(append ? [...products, ...cachedProducts] : cachedProducts);
-        page === 1 ? setIsLoading(false) : setIsFetchingMore(false);
-        return;
-      }
-
-      const token = await AsyncStorage.getItem('token');
-      console.log('Token:', token || 'No token found');
-      if (!token) {
-        setErrorMessage('Silakan login terlebih dahulu');
-        Alert.alert('Error', 'Silakan login terlebih dahulu');
-        page === 1 ? setIsLoading(false) : setIsFetchingMore(false);
-        return;
-      }
-
-      const url = new URL('http://192.168.1.6:8000/api/products/');
-      if (search) url.searchParams.set('search', search);
-      if (size) url.searchParams.set('size', size);
-      url.searchParams.set('page', page);
-      url.searchParams.set('per_page', '50');
-      console.log('API URL:', url.toString());
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-      });
-
-      console.log('Response status:', response.status);
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('API error:', errorText);
-        throw new Error(`Gagal mengambil data: ${response.status} ${errorText}`);
-      }
-
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('Respons API bukan JSON');
-      }
-
-      const data = await response.json();
-      console.log('API response:', JSON.stringify(data, null, 2));
-
-      let productData = data.data?.products || [];
-      let pagination = data.data?.pagination || { current_page: page, last_page: 1 };
-
-      if (!Array.isArray(productData)) {
-        console.error('Expected array in data.products, got:', productData);
-        throw new Error('Data produk dari API tidak valid');
-      }
-
-      const validProducts = productData.filter(
-        product => product && product.id && product.name && typeof product.stock === 'number'
-      );
-
-      if (validProducts.length === 0 && productData.length > 0) {
-        console.warn('No valid products after filtering:', productData);
-        setErrorMessage('Tidak ada produk valid ditemukan');
-      }
-
-      await AsyncStorage.setItem(
-        cacheKey,
-        JSON.stringify({ products: validProducts, pagination })
-      );
-
-      setProducts(prev => {
-        const existingIds = new Set(prev.map(p => p.id));
-        const newProducts = validProducts.filter(p => !existingIds.has(p.id));
-        return append ? [...prev, ...newProducts] : newProducts;
-      });
-
-      setCurrentPage(pagination.current_page);
-      setLastPage(pagination.last_page);
-      updateBrandCounts(append ? [...products, ...validProducts] : validProducts);
-    } catch (error) {
-      console.error('Error fetching products:', error.message);
-      setErrorMessage(error.message || 'Gagal mengambil data produk');
-      Alert.alert('Error', error.message || 'Gagal mengambil data produk');
-    } finally {
-      page === 1 ? setIsLoading(false) : setIsFetchingMore(false);
-    }
-  }, [products, isLoading, isFetchingMore]);
-
-  // Update brand counts
+  // Hitung jumlah brand
   const updateBrandCounts = useCallback((productList) => {
     const counts = {};
     productList.forEach(product => {
@@ -156,15 +95,322 @@ export default function InventoryScreen() {
       counts[brand] = (counts[brand] || 0) + (product.stock || 0);
     });
     setBrandCounts(counts);
+  }, [sanitizeString]);
+
+  // Filter produk dengan useMemo
+  const filteredProducts = useMemo(() => {
+    let filtered = products;
+    if (searchTerm.length >= 2) {
+      const searchLower = sanitizeString(searchTerm).toLowerCase();
+      filtered = filtered.filter(
+        product =>
+          (product.brand && sanitizeString(product.brand).toLowerCase().includes(searchLower)) ||
+          (product.model && sanitizeString(product.model).toLowerCase().includes(searchLower))
+      );
+    }
+    if (sizeTerm.length >= 1) {
+      const sizeLower = sanitizeString(sizeTerm).toLowerCase();
+      filtered = filtered.filter(
+        product => product.size && sanitizeString(product.size).toLowerCase().includes(sizeLower)
+      );
+    }
+    updateBrandCounts(filtered);
+    return filtered;
+  }, [products, searchTerm, sizeTerm, sanitizeString, updateBrandCounts]);
+
+  // Hitung produk untuk halaman saat ini
+  const paginatedProducts = useMemo(() => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    return filteredProducts.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredProducts, currentPage]);
+
+  // Hitung total halaman
+  const totalPages = Math.ceil(filteredProducts.length / itemsPerPage);
+
+  // Debounce pencarian
+  const debouncedSearch = useCallback(
+    debounce((search, size) => {
+      if (search.length < 2 && size.length < 1) {
+        Alert.alert('Error', 'Kata kunci brand atau model minimal 2 karakter atau masukkan ukuran.');
+        return;
+      }
+      setErrorMessage('');
+      fetchAllProducts(sanitizeString(search), sanitizeString(size));
+    }, 500),
+    [sanitizeString]
+  );
+
+  // Handle pencarian
+  const handleSearch = useCallback(() => {
+    setCurrentPage(1);
+    if (products.length > 0) {
+      // Filter sudah dilakukan oleh useMemo
+    } else {
+      debouncedSearch(searchTerm, sizeTerm);
+    }
+  }, [products, searchTerm, sizeTerm, debouncedSearch]);
+
+  // Simpan produk ke AsyncStorage
+  const saveProductsToStorage = useCallback(async (products, cacheKey) => {
+    const chunkSize = 500;
+    try {
+      for (let i = 0; i < products.length; i += chunkSize) {
+        const chunk = products.slice(i, i + chunkSize);
+        await AsyncStorage.setItem(`${cacheKey}_${i}`, JSON.stringify(chunk));
+      }
+      await AsyncStorage.setItem(`${cacheKey}_count`, JSON.stringify(products.length));
+      await AsyncStorage.setItem('cache_valid', 'true');
+      console.log(`Menyimpan ${products.length} produk ke AsyncStorage dalam potongan`);
+    } catch (error) {
+      console.error('Gagal menyimpan ke AsyncStorage:', error.message);
+      setErrorMessage('Gagal menyimpan data ke cache');
+      Alert.alert('Error', 'Gagal menyimpan data ke cache');
+    }
   }, []);
 
-  // Handle search
-  const handleSearch = () => {
-    debouncedSearch(searchTerm, sizeTerm);
-  };
+  // Muat produk dari AsyncStorage
+  const loadProductsFromStorage = useCallback(async (cacheKey) => {
+    try {
+      const isCacheValid = await AsyncStorage.getItem('cache_valid');
+      if (isCacheValid !== 'true') return null;
+      const count = await AsyncStorage.getItem(`${cacheKey}_count`);
+      if (!count) return null;
+      const total = parseInt(count, 10);
+      let allProducts = [];
+      for (let i = 0; i < total; i += 500) {
+        const chunk = await AsyncStorage.getItem(`${cacheKey}_${i}`);
+        if (chunk) {
+          allProducts = [...allProducts, ...JSON.parse(chunk)];
+        }
+      }
+      console.log(`Memuat ${allProducts.length} produk dari AsyncStorage`, allProducts);
+      return allProducts;
+    } catch (error) {
+      console.error('Gagal memuat dari AsyncStorage:', error.message);
+      return null;
+    }
+  }, []);
 
-  // Handle adding new product
-  const handleAddItem = async () => {
+  // Ambil semua produk dari API (digunakan untuk pencarian atau inisialisasi)
+  const fetchAllProducts = useCallback(async (search = '', size = '') => {
+    if (isLoading) return;
+    setIsLoading(true);
+    setErrorMessage('');
+
+    try {
+      const cacheKey = 'all_products';
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        setErrorMessage('Silakan login terlebih dahulu');
+        Alert.alert('Error', 'Silakan login terlebih dahulu');
+        setIsLoading(false);
+        return;
+      }
+
+      let allProducts = [];
+      let currentApiPage = 1;
+      let lastPage = 1;
+      const perPage = 50;
+      const maxRetries = 3;
+      const expectedTotal = 3000;
+
+      do {
+        let retries = 0;
+        let success = false;
+        while (retries < maxRetries && !success) {
+          try {
+            const url = new URL('http://192.168.1.6:8000/api/products/');
+            if (search) url.searchParams.set('search', search);
+            if (size) url.searchParams.set('size', size);
+            url.searchParams.set('page', currentApiPage);
+            url.searchParams.set('per_page', perPage);
+            console.log(`Mengambil halaman ${currentApiPage}: ${url.toString()}`);
+
+            const response = await fetch(url, {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+              timeout: 10000,
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error(`Error API di halaman ${currentApiPage}: ${response.status} ${errorText}`);
+              throw new Error(`Gagal mengambil data (halaman ${currentApiPage}): ${response.status} ${errorText}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+              throw new Error(`Respons API bukan JSON di halaman ${currentApiPage}`);
+            }
+
+            const data = await response.json();
+            let productData = data.data?.products || [];
+            if (!Array.isArray(productData)) {
+              console.error(`Array diharapkan di data.products pada halaman ${currentApiPage}, mendapat:`, productData);
+              throw new Error('Data produk dari API tidak valid');
+            }
+
+            const validProducts = productData.filter(
+              product => product && product.id && product.name && typeof product.stock === 'number'
+            );
+
+            allProducts = [...allProducts, ...validProducts];
+            console.log(`Mengambil ${validProducts.length} produk di halaman ${currentApiPage}, total: ${allProducts.length}`, validProducts);
+
+            lastPage = data.data?.pagination?.last_page || Math.ceil(expectedTotal / perPage);
+            success = true;
+          } catch (error) {
+            retries++;
+            console.error(`Coba ulang ${retries}/${maxRetries} untuk halaman ${currentApiPage}: ${error.message}`);
+            if (retries >= maxRetries) {
+              throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+
+        currentApiPage++;
+        setProducts(allProducts);
+        if (!search && !size) {
+          await saveProductsToStorage(allProducts, cacheKey);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } while (currentApiPage <= lastPage && allProducts.length < expectedTotal);
+
+      if (allProducts.length === 0) {
+        console.warn('Tidak ada produk valid ditemukan');
+        setErrorMessage('Tidak ada produk valid ditemukan');
+      } else {
+        console.log(`Total produk yang diambil: ${allProducts.length}`, allProducts);
+        if (!search && !size) {
+          await saveProductsToStorage(allProducts, cacheKey);
+        }
+      }
+
+      if (allProducts.length < expectedTotal && !search && !size) {
+        console.warn(`Diharapkan ${expectedTotal} produk, mendapat ${allProducts.length}`);
+        setErrorMessage(`Hanya berhasil mengambil ${allProducts.length} dari ${expectedTotal} produk`);
+        Alert.alert('Peringatan', `Hanya berhasil mengambil ${allProducts.length} dari ${expectedTotal} produk`);
+      }
+    } catch (error) {
+      console.error('Gagal mengambil produk:', error.message);
+      setErrorMessage(error.message || 'Gagal mengambil data produk');
+      Alert.alert('Error', error.message || 'Gagal mengambil data produk');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isLoading, saveProductsToStorage, loadProductsFromStorage]);
+
+  // Ambil produk baru berdasarkan ID terakhir
+  const fetchNewProductsById = useCallback(async () => {
+    if (isLoading) return;
+    setIsLoading(true);
+    setErrorMessage('');
+
+    try {
+      const cachedProducts = await loadProductsFromStorage('all_products');
+      let lastId = 0;
+      if (cachedProducts && cachedProducts.length > 0) {
+        lastId = Math.max(...cachedProducts.map(p => p.id || 0));
+        console.log(`ID terakhir di cache: ${lastId}`);
+      }
+
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        setErrorMessage('Silakan login terlebih dahulu');
+        Alert.alert('Error', 'Silakan login terlebih dahulu');
+        setIsLoading(false);
+        return;
+      }
+
+      let newProducts = [];
+      let currentApiPage = 1;
+      let lastPage = 1;
+      const perPage = 50;
+      const maxRetries = 3;
+
+      do {
+        let retries = 0;
+        let success = false;
+        while (retries < maxRetries && !success) {
+          try {
+            const url = new URL('http://192.168.1.6:8000/api/products/');
+            url.searchParams.set('page', currentApiPage);
+            url.searchParams.set('per_page', perPage);
+            console.log(`Mengambil produk baru di halaman ${currentApiPage}: ${url.toString()}`);
+
+            const response = await fetch(url, {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+              },
+              timeout: 10000,
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error(`Error API di halaman ${currentApiPage}: ${response.status} ${errorText}`);
+              throw new Error(`Gagal mengambil produk baru (halaman ${currentApiPage}): ${response.status} ${errorText}`);
+            }
+
+            const data = await response.json();
+            let productData = data.data?.products || [];
+            if (!Array.isArray(productData)) {
+              console.error(`Array diharapkan di data.products pada halaman ${currentApiPage}, mendapat:`, productData);
+              throw new Error('Data produk dari API tidak valid');
+            }
+
+            // Filter produk dengan ID lebih besar dari lastId
+            const validProducts = productData.filter(
+              product => product && product.id && product.id > lastId && product.name && typeof product.stock === 'number'
+            );
+
+            newProducts = [...newProducts, ...validProducts];
+            console.log(`Mengambil ${validProducts.length} produk baru di halaman ${currentApiPage}, total: ${newProducts.length}`, validProducts);
+
+            lastPage = data.data?.pagination?.last_page || 1;
+            success = true;
+          } catch (error) {
+            retries++;
+            console.error(`Coba ulang ${retries}/${maxRetries} untuk halaman ${currentApiPage}: ${error.message}`);
+            if (retries >= maxRetries) {
+              throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+
+        currentApiPage++;
+      } while (currentApiPage <= lastPage && newProducts.length === 0);
+
+      if (newProducts.length > 0) {
+        setProducts(prev => {
+          const updatedProducts = [...prev, ...newProducts.filter(np => !prev.some(p => p.id === np.id))];
+          console.log(`Menambahkan ${newProducts.length} produk baru ke state, total: ${updatedProducts.length}`, newProducts);
+          saveProductsToStorage(updatedProducts, 'all_products');
+          return updatedProducts;
+        });
+      } else {
+        console.log('Tidak ada produk baru ditemukan');
+      }
+    } catch (error) {
+      console.error('Gagal mengambil produk baru:', error.message);
+      setErrorMessage(error.message || 'Gagal mengambil produk baru');
+      Alert.alert('Error', error.message || 'Gagal mengambil produk baru');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isLoading, loadProductsFromStorage, saveProductsToStorage]);
+
+  // Tambah produk baru
+  const handleAddItem = useCallback(async () => {
     try {
       if (!newItem.name || !newItem.stock || !newItem.selling_price) {
         Alert.alert('Error', 'Nama, stok, dan harga jual wajib diisi');
@@ -202,20 +448,24 @@ export default function InventoryScreen() {
         throw new Error(`Gagal menambah produk: ${response.status} ${errorText}`);
       }
 
+      const newProduct = await response.json();
+      setProducts(prev => {
+        const updatedProducts = [...prev, newProduct.data];
+        saveProductsToStorage(updatedProducts, 'all_products');
+        return updatedProducts;
+      });
       setNewItem({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
       setCurrentPage(1);
-      setProducts([]);
       setErrorMessage('');
-      fetchProducts(searchTerm, sizeTerm, 1);
       Alert.alert('Sukses', 'Produk berhasil ditambahkan');
     } catch (error) {
-      console.error('Error adding product:', error.message);
+      console.error('Gagal menambah produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal menambah produk');
     }
-  };
+  }, [newItem, sanitizeString, saveProductsToStorage]);
 
-  // Handle updating product
-  const handleUpdateItem = async () => {
+  // Perbarui produk
+  const handleUpdateItem = useCallback(async () => {
     try {
       if (!editItem.name || !editItem.stock || !editItem.selling_price) {
         Alert.alert('Error', 'Nama, stok, dan harga jual wajib diisi');
@@ -253,20 +503,24 @@ export default function InventoryScreen() {
         throw new Error(`Gagal memperbarui produk: ${response.status} ${errorText}`);
       }
 
+      const updatedProduct = await response.json();
+      setProducts(prev => {
+        const updatedProducts = prev.map(p => (p.id === editItem.id ? updatedProduct.data : p));
+        saveProductsToStorage(updatedProducts, 'all_products');
+        return updatedProducts;
+      });
       setEditItem(null);
       setCurrentPage(1);
-      setProducts([]);
       setErrorMessage('');
-      fetchProducts(searchTerm, sizeTerm, 1);
       Alert.alert('Sukses', 'Produk berhasil diperbarui');
     } catch (error) {
-      console.error('Error updating product:', error.message);
+      console.error('Gagal memperbarui produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal memperbarui produk');
     }
-  };
+  }, [editItem, sanitizeString, saveProductsToStorage]);
 
-  // Handle deleting product
-  const handleDeleteItem = async (id) => {
+  // Hapus produk
+  const handleDeleteItem = useCallback((id) => {
     Alert.alert(
       'Konfirmasi',
       'Apakah Anda yakin ingin menghapus produk ini?',
@@ -297,138 +551,117 @@ export default function InventoryScreen() {
                 throw new Error(`Gagal menghapus produk: ${response.status} ${errorText}`);
               }
 
+              setProducts(prev => {
+                const updatedProducts = prev.filter(p => p.id !== id);
+                saveProductsToStorage(updatedProducts, 'all_products');
+                return updatedProducts;
+              });
               setCurrentPage(1);
-              setProducts([]);
               setErrorMessage('');
-              fetchProducts(searchTerm, sizeTerm, 1);
               Alert.alert('Sukses', 'Produk berhasil dihapus');
             } catch (error) {
-              console.error('Error deleting product:', error.message);
+              console.error('Gagal menghapus produk:', error.message);
               Alert.alert('Error', error.message || 'Gagal menghapus produk');
             }
           },
         },
       ]
     );
-  };
+  }, [saveProductsToStorage]);
 
-  // Load more products
-  const loadMoreProducts = () => {
-    if (currentPage < lastPage && !isFetchingMore) {
-      fetchProducts(searchTerm, sizeTerm, currentPage + 1, true);
-    }
-  };
+  // Cek cache dan sinkronisasi produk baru saat layar fokus
+  useFocusEffect(
+    useCallback(() => {
+      const checkCacheAndSync = async () => {
+        const cachedProducts = await loadProductsFromStorage('all_products');
+        if (cachedProducts && cachedProducts.length > 0) {
+          console.log(`Layar fokus, menggunakan data cache: ${cachedProducts.length} produk`);
+          setProducts(cachedProducts);
+          setCurrentPage(1);
 
-  // Mock data untuk testing
-  const useMockData = () => {
-    const mockProducts = [
-      { id: 1, name: 'Nike Air Max', brand: 'Nike', model: 'Air Max', size: '42', color: 'Black', stock: 10, selling_price: 1500000, discount_price: 1200000 },
-      { id: 2, name: 'Adidas Ultraboost', brand: 'Adidas', model: 'Ultraboost', size: '41', color: 'White', stock: 5, selling_price: 2000000, discount_price: null },
-    ];
-    setProducts(mockProducts);
-    updateBrandCounts(mockProducts);
-    setErrorMessage('');
-    Alert.alert('Info', 'Menggunakan data mock untuk testing');
-  };
+          // Cek produk baru
+          await fetchNewProductsById();
+        } else {
+          console.log('Layar fokus, cache tidak valid, mengambil semua data');
+          fetchAllProducts();
+        }
+      };
+      checkCacheAndSync();
+    }, [fetchAllProducts, fetchNewProductsById, loadProductsFromStorage])
+  );
 
-  // Render product item
-  const renderItem = useCallback(({ item, index }) => {
-    if (!item || !item.name || !item.id) {
-      console.warn('Invalid product item:', item);
-      return null;
-    }
-    const brand = sanitizeString(item.brand) || 'Unknown';
-    const model = sanitizeString(item.model) || '-';
-    const rowNumber = index + 1;
-    const stock = item.stock || 0;
-    const physicalStock = stock;
-    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(`http://192.168.1.6:8000/inventory/${item.id}`)}`;
-
-    return (
-      <View>
-        {index === 0 || (products[index - 1] && products[index - 1].brand !== brand) ? (
-          <Text style={styles.brandHeader}>{brand.toUpperCase()}</Text>
-        ) : null}
-        <View style={[styles.item, index % 2 === 0 ? styles.itemEven : styles.itemOdd]}>
-          <Text style={styles.itemText}>{rowNumber}</Text>
-          <View style={styles.itemTextContainer}>
-            <Text style={styles.itemText}>{brand.toUpperCase()}</Text>
-          </View>
-          <Text style={styles.itemText}>{model.toUpperCase()}</Text>
-          <Text style={styles.itemText}>{sanitizeString(item.size) || '-'}</Text>
-          <Text style={styles.itemText}>{sanitizeString(item.color)?.toUpperCase() || '-'}</Text>
-          <Text style={[styles.itemText, stock < 5 ? styles.lowStock : null]}>{stock}</Text>
-          <Text style={styles.itemText}>{physicalStock}</Text>
-          <Text style={styles.itemText}>Rp {new Intl.NumberFormat('id-ID').format(parseFloat(item.selling_price) || 0)}</Text>
-          <Text style={styles.itemText}>
-            {item.discount_price ? `Rp ${new Intl.NumberFormat('id-ID').format(parseFloat(item.discount_price))}` : '-'}
-          </Text>
-          <Image
-            source={{ uri: qrCodeUrl }}
-            style={styles.qrCode}
-            onError={(e) => console.log(`Failed to load QR code for product ${item.id}:`, e.nativeEvent.error)}
-          />
-          <View style={styles.actions}>
-            <TouchableOpacity
-              onPress={() =>
-                setEditItem({
-                  ...item,
-                  stock: item.stock?.toString() || '0',
-                  selling_price: item.selling_price?.toString() || '0',
-                  discount_price: item.discount_price?.toString() || '',
-                })
-              }
-            >
-              <Text style={styles.actionText}>Edit</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => handleDeleteItem(item.id)}>
-              <Text style={[styles.actionText, { color: '#d9534f' }]}>Hapus</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </View>
-    );
-  }, [products]);
-
-  // Initial fetch
-  useEffect(() => {
-    fetchProducts();
-  }, []);
+  // Render item produk
+  const renderItem = useCallback(
+    ({ item, index }) => {
+      const showBrandHeader = index === 0 || (paginatedProducts[index - 1] && paginatedProducts[index - 1].brand !== item.brand);
+      return (
+        <ProductItem
+          item={item}
+          index={(currentPage - 1) * itemsPerPage + index}
+          onEdit={(item) =>
+            setEditItem({
+              ...item,
+              stock: item.stock?.toString() || '0',
+              selling_price: item.selling_price?.toString() || '0',
+              discount_price: item.discount_price?.toString() || '',
+            })
+          }
+          onDelete={handleDeleteItem}
+          showBrandHeader={showBrandHeader}
+        />
+      );
+    },
+    [currentPage, handleDeleteItem, paginatedProducts]
+  );
 
   return (
     <ScrollView style={styles.container}>
-      <Text style={styles.title}>MANAGEMENT INVENTORY</Text>
+      <Text style={styles.title}>MANAJEMEN INVENTARIS</Text>
 
-      {/* Inventory Information Cards */}
+      {/* Kartu Informasi Inventaris */}
       <View style={styles.infoContainer}>
-        <Text style={styles.infoTitle}>INVENTORY INFORMATION</Text>
+        <Text style={styles.infoTitle}>INFORMASI INVENTARIS</Text>
         <View style={styles.infoGrid}>
           <View style={styles.infoCard}>
             <Text style={styles.infoCardTitle}>Total Produk</Text>
-            <Text style={styles.infoCardValue}>{products.length}</Text>
+            <Text style={styles.infoCardValue}>{filteredProducts.length}</Text>
           </View>
           <View style={styles.infoCard}>
             <Text style={styles.infoCardTitle}>Stok Menipis</Text>
-            <Text style={styles.infoCardValue}>{products.filter(p => p && p.stock < 5).length}</Text>
+            <Text style={styles.infoCardValue}>{filteredProducts.filter(p => p && p.stock < 5).length}</Text>
           </View>
           <View style={styles.infoCard}>
             <Text style={styles.infoCardTitle}>Total Unit</Text>
-            <Text style={styles.infoCardValue}>{products.reduce((sum, p) => sum + (p && p.stock || 0), 0)}</Text>
+            <Text style={styles.infoCardValue}>{filteredProducts.reduce((sum, p) => sum + (p && p.stock || 0), 0)}</Text>
           </View>
           <View style={styles.infoCard}>
             <Text style={styles.infoCardTitle}>Jumlah Unit per Brand</Text>
-            <Text style={styles.infoCardValue}>
-              {Object.entries(brandCounts).length > 0
-                ? Object.entries(brandCounts)
-                    .map(([brand, count]) => `${sanitizeString(brand).toUpperCase()} (${count} unit)`)
-                    .join(', ')
-                : 'Tidak ada brand'}
-            </Text>
+            <View style={styles.pickerContainer}>
+              <Picker
+                selectedValue={selectedBrand}
+                onValueChange={(value) => setSelectedBrand(value)}
+                style={styles.picker}
+              >
+                <Picker.Item label={`Semua (${Object.keys(brandCounts).length} brand)`} value="all" />
+                {Object.entries(brandCounts).map(([brand, count]) => (
+                  <Picker.Item
+                    key={brand}
+                    label={`${sanitizeString(brand).toUpperCase()} (${count} unit)`}
+                    value={brand}
+                  />
+                ))}
+              </Picker>
+              {selectedBrand !== 'all' && (
+                <Text style={styles.infoCardValue}>
+                  {sanitizeString(selectedBrand).toUpperCase()}: {brandCounts[selectedBrand]} unit
+                </Text>
+              )}
+            </View>
           </View>
         </View>
       </View>
 
-      {/* Search and Buttons */}
+      {/* Pencarian dan Tombol */}
       <View style={styles.searchContainer}>
         <TextInput
           style={styles.searchInput}
@@ -436,7 +669,7 @@ export default function InventoryScreen() {
           value={searchTerm}
           onChangeText={(text) => {
             setSearchTerm(text);
-            debouncedSearch(text, sizeTerm);
+            setCurrentPage(1);
           }}
         />
         <TextInput
@@ -445,14 +678,22 @@ export default function InventoryScreen() {
           value={sizeTerm}
           onChangeText={(text) => {
             setSizeTerm(text);
-            debouncedSearch(searchTerm, text);
+            setCurrentPage(1);
           }}
         />
         <Button title="Cari" onPress={handleSearch} color="#f28c38" />
-        <Button title="Gunakan Mock Data" onPress={useMockData} color="#28a745" />
+        <Button
+          title="Refresh Produk Baru"
+          onPress={async () => {
+            setIsLoading(true);
+            await fetchNewProductsById();
+            setIsLoading(false);
+          }}
+          color="#f28c38"
+        />
       </View>
 
-      {/* Add/Edit Form */}
+      {/* Form Tambah/Edit */}
       <View style={styles.form}>
         <TextInput
           style={styles.input}
@@ -501,11 +742,11 @@ export default function InventoryScreen() {
         {editItem && <Button title="Batal" color="gray" onPress={() => setEditItem(null)} />}
       </View>
 
-      {/* Product List */}
+      {/* Daftar Produk dan Pagination */}
       <View style={styles.tableContainer}>
         {isLoading && <ActivityIndicator size="large" color="#f28c38" />}
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-        {products.length === 0 && !isLoading && !errorMessage ? (
+        {filteredProducts.length === 0 && !isLoading && !errorMessage ? (
           <Text style={styles.errorText}>Tidak ada produk ditemukan</Text>
         ) : null}
         <View style={styles.tableHeader}>
@@ -522,17 +763,39 @@ export default function InventoryScreen() {
           <Text style={styles.headerText}>Aksi</Text>
         </View>
         <FlatList
-          data={products}
+          data={paginatedProducts}
           keyExtractor={item => item.id?.toString() || Math.random().toString()}
           renderItem={renderItem}
           scrollEnabled={false}
-          onEndReached={loadMoreProducts}
-          onEndReachedThreshold={0.5}
-          ListFooterComponent={isFetchingMore ? <ActivityIndicator size="small" color="#f28c38" /> : null}
-          initialNumToRender={10}
-          maxToRenderPerBatch={10}
-          windowSize={5}
+          initialNumToRender={itemsPerPage}
+          maxToRenderPerBatch={itemsPerPage}
+          windowSize={2}
+          removeClippedSubviews={true}
+          getItemLayout={(data, index) => ({
+            length: 60,
+            offset: 60 * index,
+            index,
+          })}
         />
+        {totalPages > 1 && (
+          <View style={styles.paginationContainer}>
+            <Button
+              title="Sebelumnya"
+              disabled={currentPage === 1}
+              onPress={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+              color="#f28c38"
+            />
+            <Text style={styles.paginationText}>
+              Halaman {currentPage} dari {totalPages}
+            </Text>
+            <Button
+              title="Selanjutnya"
+              disabled={currentPage === totalPages}
+              onPress={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+              color="#f28c38"
+            />
+          </View>
+        )}
       </View>
     </ScrollView>
   );
@@ -588,6 +851,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#4b5563',
   },
+  pickerContainer: {
+    marginTop: 5,
+  },
+  picker: {
+    backgroundColor: '#fff',
+    borderRadius: 5,
+    height: 40,
+  },
   searchContainer: {
     backgroundColor: '#333',
     padding: 10,
@@ -639,6 +910,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     padding: 8,
     alignItems: 'center',
+    minHeight: 60,
   },
   itemEven: {
     backgroundColor: '#fff',
@@ -685,5 +957,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginVertical: 10,
     fontSize: 14,
+  },
+  paginationContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 10,
+  },
+  paginationText: {
+    fontSize: 14,
+    color: '#fff',
   },
 });
