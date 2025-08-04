@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -150,55 +150,31 @@ export default function InventoryScreen() {
     }
   }, [products, searchTerm, sizeTerm, debouncedSearch]);
 
-  // Simpan produk ke AsyncStorage
-  const saveProductsToStorage = useCallback(async (products, cacheKey) => {
-    const chunkSize = 500;
+  // Bersihkan cache AsyncStorage
+  const clearCache = useCallback(async () => {
     try {
-      for (let i = 0; i < products.length; i += chunkSize) {
-        const chunk = products.slice(i, i + chunkSize);
-        await AsyncStorage.setItem(`${cacheKey}_${i}`, JSON.stringify(chunk));
-      }
-      await AsyncStorage.setItem(`${cacheKey}_count`, JSON.stringify(products.length));
-      await AsyncStorage.setItem('cache_valid', 'true');
-      console.log(`Menyimpan ${products.length} produk ke AsyncStorage dalam potongan`);
-    } catch (error) {
-      console.error('Gagal menyimpan ke AsyncStorage:', error.message);
-      setErrorMessage('Gagal menyimpan data ke cache');
-      Alert.alert('Error', 'Gagal menyimpan data ke cache');
-    }
-  }, []);
-
-  // Muat produk dari AsyncStorage
-  const loadProductsFromStorage = useCallback(async (cacheKey) => {
-    try {
-      const isCacheValid = await AsyncStorage.getItem('cache_valid');
-      if (isCacheValid !== 'true') return null;
+      await AsyncStorage.removeItem('cache_valid');
+      const cacheKey = 'all_products';
       const count = await AsyncStorage.getItem(`${cacheKey}_count`);
-      if (!count) return null;
-      const total = parseInt(count, 10);
-      let allProducts = [];
-      for (let i = 0; i < total; i += 500) {
-        const chunk = await AsyncStorage.getItem(`${cacheKey}_${i}`);
-        if (chunk) {
-          allProducts = [...allProducts, ...JSON.parse(chunk)];
+      if (count) {
+        const total = parseInt(count, 10);
+        for (let i = 0; i < total; i += 500) {
+          await AsyncStorage.removeItem(`${cacheKey}_${i}`);
         }
+        await AsyncStorage.removeItem(`${cacheKey}_count`);
       }
-      console.log(`Memuat ${allProducts.length} produk dari AsyncStorage`, allProducts);
-      return allProducts;
+      console.log('Cache AsyncStorage berhasil dibersihkan');
     } catch (error) {
-      console.error('Gagal memuat dari AsyncStorage:', error.message);
-      return null;
+      console.error('Gagal membersihkan cache:', error.message);
     }
   }, []);
 
-  // Ambil semua produk dari API (digunakan untuk pencarian atau inisialisasi)
+  // Ambil semua produk dari API
   const fetchAllProducts = useCallback(async (search = '', size = '') => {
-    if (isLoading) return;
     setIsLoading(true);
     setErrorMessage('');
 
     try {
-      const cacheKey = 'all_products';
       const token = await AsyncStorage.getItem('token');
       if (!token) {
         setErrorMessage('Silakan login terlebih dahulu');
@@ -210,9 +186,8 @@ export default function InventoryScreen() {
       let allProducts = [];
       let currentApiPage = 1;
       let lastPage = 1;
-      const perPage = 50;
+      const perPage = 100; // Increased for faster fetching
       const maxRetries = 3;
-      const expectedTotal = 3000;
 
       do {
         let retries = 0;
@@ -224,6 +199,9 @@ export default function InventoryScreen() {
             if (size) url.searchParams.set('size', size);
             url.searchParams.set('page', currentApiPage);
             url.searchParams.set('per_page', perPage);
+            url.searchParams.set('no_cache', 'true'); // Bypass backend cache
+            url.searchParams.set('order_by', 'created_at'); // Sort by newest
+            url.searchParams.set('sort', 'desc');
             console.log(`Mengambil halaman ${currentApiPage}: ${url.toString()}`);
 
             const response = await fetch(url, {
@@ -232,6 +210,7 @@ export default function InventoryScreen() {
                 Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json',
                 Accept: 'application/json',
+                'Cache-Control': 'no-cache', // Bypass client-side cache
               },
               timeout: 10000,
             });
@@ -259,121 +238,7 @@ export default function InventoryScreen() {
             );
 
             allProducts = [...allProducts, ...validProducts];
-            console.log(`Mengambil ${validProducts.length} produk di halaman ${currentApiPage}, total: ${allProducts.length}`, validProducts);
-
-            lastPage = data.data?.pagination?.last_page || Math.ceil(expectedTotal / perPage);
-            success = true;
-          } catch (error) {
-            retries++;
-            console.error(`Coba ulang ${retries}/${maxRetries} untuk halaman ${currentApiPage}: ${error.message}`);
-            if (retries >= maxRetries) {
-              throw error;
-            }
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
-        }
-
-        currentApiPage++;
-        setProducts(allProducts);
-        if (!search && !size) {
-          await saveProductsToStorage(allProducts, cacheKey);
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } while (currentApiPage <= lastPage && allProducts.length < expectedTotal);
-
-      if (allProducts.length === 0) {
-        console.warn('Tidak ada produk valid ditemukan');
-        setErrorMessage('Tidak ada produk valid ditemukan');
-      } else {
-        console.log(`Total produk yang diambil: ${allProducts.length}`, allProducts);
-        if (!search && !size) {
-          await saveProductsToStorage(allProducts, cacheKey);
-        }
-      }
-
-      if (allProducts.length < expectedTotal && !search && !size) {
-        console.warn(`Diharapkan ${expectedTotal} produk, mendapat ${allProducts.length}`);
-        setErrorMessage(`Hanya berhasil mengambil ${allProducts.length} dari ${expectedTotal} produk`);
-        Alert.alert('Peringatan', `Hanya berhasil mengambil ${allProducts.length} dari ${expectedTotal} produk`);
-      }
-    } catch (error) {
-      console.error('Gagal mengambil produk:', error.message);
-      setErrorMessage(error.message || 'Gagal mengambil data produk');
-      Alert.alert('Error', error.message || 'Gagal mengambil data produk');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isLoading, saveProductsToStorage, loadProductsFromStorage]);
-
-  // Ambil produk baru berdasarkan ID terakhir
-  const fetchNewProductsById = useCallback(async () => {
-    if (isLoading) return;
-    setIsLoading(true);
-    setErrorMessage('');
-
-    try {
-      const cachedProducts = await loadProductsFromStorage('all_products');
-      let lastId = 0;
-      if (cachedProducts && cachedProducts.length > 0) {
-        lastId = Math.max(...cachedProducts.map(p => p.id || 0));
-        console.log(`ID terakhir di cache: ${lastId}`);
-      }
-
-      const token = await AsyncStorage.getItem('token');
-      if (!token) {
-        setErrorMessage('Silakan login terlebih dahulu');
-        Alert.alert('Error', 'Silakan login terlebih dahulu');
-        setIsLoading(false);
-        return;
-      }
-
-      let newProducts = [];
-      let currentApiPage = 1;
-      let lastPage = 1;
-      const perPage = 50;
-      const maxRetries = 3;
-
-      do {
-        let retries = 0;
-        let success = false;
-        while (retries < maxRetries && !success) {
-          try {
-            const url = new URL('http://192.168.1.6:8000/api/products/');
-            url.searchParams.set('page', currentApiPage);
-            url.searchParams.set('per_page', perPage);
-            console.log(`Mengambil produk baru di halaman ${currentApiPage}: ${url.toString()}`);
-
-            const response = await fetch(url, {
-              method: 'GET',
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-              },
-              timeout: 10000,
-            });
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              console.error(`Error API di halaman ${currentApiPage}: ${response.status} ${errorText}`);
-              throw new Error(`Gagal mengambil produk baru (halaman ${currentApiPage}): ${response.status} ${errorText}`);
-            }
-
-            const data = await response.json();
-            let productData = data.data?.products || [];
-            if (!Array.isArray(productData)) {
-              console.error(`Array diharapkan di data.products pada halaman ${currentApiPage}, mendapat:`, productData);
-              throw new Error('Data produk dari API tidak valid');
-            }
-
-            // Filter produk dengan ID lebih besar dari lastId
-            const validProducts = productData.filter(
-              product => product && product.id && product.id > lastId && product.name && typeof product.stock === 'number'
-            );
-
-            newProducts = [...newProducts, ...validProducts];
-            console.log(`Mengambil ${validProducts.length} produk baru di halaman ${currentApiPage}, total: ${newProducts.length}`, validProducts);
+            console.log(`Mengambil ${validProducts.length} produk di halaman ${currentApiPage}, total: ${allProducts.length}`);
 
             lastPage = data.data?.pagination?.last_page || 1;
             success = true;
@@ -388,26 +253,24 @@ export default function InventoryScreen() {
         }
 
         currentApiPage++;
-      } while (currentApiPage <= lastPage && newProducts.length === 0);
+      } while (currentApiPage <= lastPage);
 
-      if (newProducts.length > 0) {
-        setProducts(prev => {
-          const updatedProducts = [...prev, ...newProducts.filter(np => !prev.some(p => p.id === np.id))];
-          console.log(`Menambahkan ${newProducts.length} produk baru ke state, total: ${updatedProducts.length}`, newProducts);
-          saveProductsToStorage(updatedProducts, 'all_products');
-          return updatedProducts;
-        });
+      if (allProducts.length === 0) {
+        console.warn('Tidak ada produk valid ditemukan');
+        setErrorMessage('Tidak ada produk valid ditemukan');
       } else {
-        console.log('Tidak ada produk baru ditemukan');
+        console.log(`Total produk yang diambil: ${allProducts.length}`);
+        setProducts(allProducts);
+        await clearCache(); // Clear cache to avoid stale data
       }
     } catch (error) {
-      console.error('Gagal mengambil produk baru:', error.message);
-      setErrorMessage(error.message || 'Gagal mengambil produk baru');
-      Alert.alert('Error', error.message || 'Gagal mengambil produk baru');
+      console.error('Gagal mengambil produk:', error.message);
+      setErrorMessage(error.message || 'Gagal mengambil data produk');
+      Alert.alert('Error', error.message || 'Gagal mengambil data produk');
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading, loadProductsFromStorage, saveProductsToStorage]);
+  }, [clearCache]);
 
   // Tambah produk baru
   const handleAddItem = useCallback(async () => {
@@ -432,6 +295,7 @@ export default function InventoryScreen() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           Accept: 'application/json',
+          'Cache-Control': 'no-cache',
         },
         body: JSON.stringify({
           brand: brand || 'Unknown',
@@ -449,20 +313,27 @@ export default function InventoryScreen() {
       }
 
       const newProduct = await response.json();
+      console.log('Produk baru ditambahkan:', newProduct.data);
+
       setProducts(prev => {
         const updatedProducts = [...prev, newProduct.data];
-        saveProductsToStorage(updatedProducts, 'all_products');
+        console.log('State products diperbarui:', updatedProducts.length);
         return updatedProducts;
       });
       setNewItem({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
       setCurrentPage(1);
       setErrorMessage('');
       Alert.alert('Sukses', 'Produk berhasil ditambahkan');
+
+      // Bersihkan cache dan ambil data baru
+      await clearCache();
+      await fetchAllProducts();
+
     } catch (error) {
       console.error('Gagal menambah produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal menambah produk');
     }
-  }, [newItem, sanitizeString, saveProductsToStorage]);
+  }, [newItem, sanitizeString, clearCache, fetchAllProducts]);
 
   // Perbarui produk
   const handleUpdateItem = useCallback(async () => {
@@ -487,6 +358,7 @@ export default function InventoryScreen() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
           Accept: 'application/json',
+          'Cache-Control': 'no-cache',
         },
         body: JSON.stringify({
           brand: brand || 'Unknown',
@@ -506,18 +378,23 @@ export default function InventoryScreen() {
       const updatedProduct = await response.json();
       setProducts(prev => {
         const updatedProducts = prev.map(p => (p.id === editItem.id ? updatedProduct.data : p));
-        saveProductsToStorage(updatedProducts, 'all_products');
+        console.log('State products diperbarui setelah edit:', updatedProducts.length);
         return updatedProducts;
       });
       setEditItem(null);
       setCurrentPage(1);
       setErrorMessage('');
       Alert.alert('Sukses', 'Produk berhasil diperbarui');
+
+      // Bersihkan cache dan ambil data baru
+      await clearCache();
+      await fetchAllProducts();
+
     } catch (error) {
       console.error('Gagal memperbarui produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal memperbarui produk');
     }
-  }, [editItem, sanitizeString, saveProductsToStorage]);
+  }, [editItem, sanitizeString, clearCache, fetchAllProducts]);
 
   // Hapus produk
   const handleDeleteItem = useCallback((id) => {
@@ -543,6 +420,7 @@ export default function InventoryScreen() {
                   Authorization: `Bearer ${token}`,
                   'Content-Type': 'application/json',
                   Accept: 'application/json',
+                  'Cache-Control': 'no-cache',
                 },
               });
 
@@ -553,12 +431,17 @@ export default function InventoryScreen() {
 
               setProducts(prev => {
                 const updatedProducts = prev.filter(p => p.id !== id);
-                saveProductsToStorage(updatedProducts, 'all_products');
+                console.log('State products diperbarui setelah hapus:', updatedProducts.length);
                 return updatedProducts;
               });
               setCurrentPage(1);
               setErrorMessage('');
               Alert.alert('Sukses', 'Produk berhasil dihapus');
+
+              // Bersihkan cache dan ambil data baru
+              await clearCache();
+              await fetchAllProducts();
+
             } catch (error) {
               console.error('Gagal menghapus produk:', error.message);
               Alert.alert('Error', error.message || 'Gagal menghapus produk');
@@ -567,27 +450,18 @@ export default function InventoryScreen() {
         },
       ]
     );
-  }, [saveProductsToStorage]);
+  }, [clearCache, fetchAllProducts]);
 
-  // Cek cache dan sinkronisasi produk baru saat layar fokus
+  // Cek cache dan sinkronisasi saat layar fokus
   useFocusEffect(
     useCallback(() => {
-      const checkCacheAndSync = async () => {
-        const cachedProducts = await loadProductsFromStorage('all_products');
-        if (cachedProducts && cachedProducts.length > 0) {
-          console.log(`Layar fokus, menggunakan data cache: ${cachedProducts.length} produk`);
-          setProducts(cachedProducts);
-          setCurrentPage(1);
-
-          // Cek produk baru
-          await fetchNewProductsById();
-        } else {
-          console.log('Layar fokus, cache tidak valid, mengambil semua data');
-          fetchAllProducts();
-        }
+      const checkAndSync = async () => {
+        console.log('Layar fokus, mengambil data baru');
+        await clearCache();
+        await fetchAllProducts();
       };
-      checkCacheAndSync();
-    }, [fetchAllProducts, fetchNewProductsById, loadProductsFromStorage])
+      checkAndSync();
+    }, [clearCache, fetchAllProducts])
   );
 
   // Render item produk
@@ -683,10 +557,11 @@ export default function InventoryScreen() {
         />
         <Button title="Cari" onPress={handleSearch} color="#f28c38" />
         <Button
-          title="Refresh Produk Baru"
+          title="Refresh Produk"
           onPress={async () => {
             setIsLoading(true);
-            await fetchNewProductsById();
+            await clearCache();
+            await fetchAllProducts();
             setIsLoading(false);
           }}
           color="#f28c38"
@@ -764,13 +639,14 @@ export default function InventoryScreen() {
         </View>
         <FlatList
           data={paginatedProducts}
-          keyExtractor={item => item.id?.toString() || Math.random().toString()}
+          keyExtractor={item => item.id?.toString()}
           renderItem={renderItem}
           scrollEnabled={false}
           initialNumToRender={itemsPerPage}
           maxToRenderPerBatch={itemsPerPage}
           windowSize={2}
           removeClippedSubviews={true}
+          extraData={products}
           getItemLayout={(data, index) => ({
             length: 60,
             offset: 60 * index,
