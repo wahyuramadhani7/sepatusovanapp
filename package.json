@@ -16,6 +16,8 @@
     "@react-navigation/native": "^7.1.17",
     "@react-navigation/stack": "^7.4.5",
     "axios": "^1.11.0",
+    "date-fns": "^4.1.0",
+    "dayjs": "^1.11.13",
     "expo": "~53.0.20",
     "expo-linear-gradient": "^14.1.5",
     "expo-status-bar": "~2.2.3",
