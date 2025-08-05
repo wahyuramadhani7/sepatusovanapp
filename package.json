@@ -32,7 +32,10 @@
     "react-native-safe-area-context": "^5.5.2",
     "react-native-screens": "^4.13.1",
     "react-native-svg": "^15.12.1",
-    "react-native-web": "^0.20.0"
+    "react-native-vision-camera": "^4.7.1",
+    "react-native-web": "^0.20.0",
+    "vision-camera-code-scanner": "^0.2.0",
+    "expo-camera": "~16.1.11"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0"
