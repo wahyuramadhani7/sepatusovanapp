@@ -28,9 +28,25 @@ const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader
   const rowNumber = index + 1;
   const stock = item.stock || 0;
   const physicalStock = stock;
-  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(
-    `http://192.168.1.6:8000/inventory/${item.id}`
-  )}`;
+  const unit = item.units && item.units.length > 0 ? item.units[0] : { unit_code: '-', qr_code: null };
+
+  // Fungsi untuk memvalidasi URL
+  const isValidUrl = (url) => {
+    try {
+      new URL(url);
+      return url.match(/\.(png|jpg|jpeg)$/i) !== null;
+    } catch {
+      return false;
+    }
+  };
+
+  // Gunakan unit.qr_code jika valid, fallback ke API QR code
+  const qrCodeUrl = unit.qr_code && isValidUrl(unit.qr_code)
+    ? `${unit.qr_code}?t=${Date.now()}`
+    : `https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(
+        `http://192.168.1.6:8000/inventory/${item.id}`
+      )}&t=${Date.now()}`;
+  const unitCode = unit.unit_code || '-';
 
   return (
     <View>
@@ -38,23 +54,28 @@ const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader
         <Text style={styles.brandHeader}>{brand.toUpperCase()}</Text>
       )}
       <View style={[styles.item, index % 2 === 0 ? styles.itemEven : styles.itemOdd]}>
-        <Text style={styles.itemText}>{rowNumber}</Text>
-        <View style={styles.itemTextContainer}>
-          <Text style={styles.itemText}>{brand.toUpperCase()}</Text>
+        <Text style={[styles.itemText, styles.itemNo]}>{rowNumber}</Text>
+        <View style={[styles.itemTextContainer, styles.itemBrand]}>
+          <Text style={styles.itemText} numberOfLines={1} ellipsizeMode="tail">{brand.toUpperCase()}</Text>
         </View>
-        <Text style={styles.itemText}>{model.toUpperCase()}</Text>
-        <Text style={styles.itemText}>{item.size ? item.size.replace(/['"]/g, '').replace(/\n/g, '') : '-'}</Text>
-        <Text style={styles.itemText}>{item.color ? item.color.replace(/['"]/g, '').replace(/\n/g, '').toUpperCase() : '-'}</Text>
-        <Text style={[styles.itemText, stock < 5 ? styles.lowStock : null]}>{stock}</Text>
-        <Text style={styles.itemText}>{physicalStock}</Text>
-        <Text style={styles.itemText}>Rp {new Intl.NumberFormat('id-ID').format(parseFloat(item.selling_price) || 0)}</Text>
-        <Text style={styles.itemText}>
+        <View style={[styles.itemTextContainer, styles.itemModel]}>
+          <Text style={styles.itemText} numberOfLines={1} ellipsizeMode="tail">{model.toUpperCase()}</Text>
+        </View>
+        <Text style={[styles.itemText, styles.itemSize]} numberOfLines={1} ellipsizeMode="tail">{item.size ? item.size.replace(/['"]/g, '').replace(/\n/g, '') : '-'}</Text>
+        <Text style={[styles.itemText, styles.itemColor]} numberOfLines={1} ellipsizeMode="tail">{item.color ? item.color.replace(/['"]/g, '').replace(/\n/g, '').toUpperCase() : '-'}</Text>
+        <Text style={[styles.itemText, styles.itemStock, stock < 5 ? styles.lowStock : null]}>{stock}</Text>
+        <Text style={[styles.itemText, styles.itemPhysical]}>{physicalStock}</Text>
+        <Text style={[styles.itemText, styles.itemPrice]} numberOfLines={1} ellipsizeMode="tail">Rp {new Intl.NumberFormat('id-ID').format(parseFloat(item.selling_price) || 0)}</Text>
+        <Text style={[styles.itemText, styles.itemDiscount]} numberOfLines={1} ellipsizeMode="tail">
           {item.discount_price ? `Rp ${new Intl.NumberFormat('id-ID').format(parseFloat(item.discount_price))}` : '-'}
         </Text>
+        <Text style={[styles.itemText, styles.itemUnitCode]} numberOfLines={1} ellipsizeMode="tail">{unitCode}</Text>
         <Image
           source={{ uri: qrCodeUrl }}
           style={styles.qrCode}
-          onError={(e) => console.log(`Gagal memuat QR code untuk produk ${item.id}:`, e.nativeEvent.error)}
+          onError={(e) => {
+            console.error(`Gagal memuat QR code untuk produk ${item.id}: ${e.nativeEvent.error}`);
+          }}
         />
         <View style={styles.actions}>
           <TouchableOpacity onPress={() => onEdit(item)}>
@@ -186,7 +207,7 @@ export default function InventoryScreen() {
       let allProducts = [];
       let currentApiPage = 1;
       let lastPage = 1;
-      const perPage = 100; // Increased for faster fetching
+      const perPage = 100;
       const maxRetries = 3;
 
       do {
@@ -199,10 +220,9 @@ export default function InventoryScreen() {
             if (size) url.searchParams.set('size', size);
             url.searchParams.set('page', currentApiPage);
             url.searchParams.set('per_page', perPage);
-            url.searchParams.set('no_cache', 'true'); // Bypass backend cache
-            url.searchParams.set('order_by', 'created_at'); // Sort by newest
+            url.searchParams.set('no_cache', 'true');
+            url.searchParams.set('order_by', 'created_at');
             url.searchParams.set('sort', 'desc');
-            console.log(`Mengambil halaman ${currentApiPage}: ${url.toString()}`);
 
             const response = await fetch(url, {
               method: 'GET',
@@ -210,14 +230,13 @@ export default function InventoryScreen() {
                 Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json',
                 Accept: 'application/json',
-                'Cache-Control': 'no-cache', // Bypass client-side cache
+                'Cache-Control': 'no-cache',
               },
               timeout: 10000,
             });
 
             if (!response.ok) {
               const errorText = await response.text();
-              console.error(`Error API di halaman ${currentApiPage}: ${response.status} ${errorText}`);
               throw new Error(`Gagal mengambil data (halaman ${currentApiPage}): ${response.status} ${errorText}`);
             }
 
@@ -229,22 +248,18 @@ export default function InventoryScreen() {
             const data = await response.json();
             let productData = data.data?.products || [];
             if (!Array.isArray(productData)) {
-              console.error(`Array diharapkan di data.products pada halaman ${currentApiPage}, mendapat:`, productData);
               throw new Error('Data produk dari API tidak valid');
             }
 
             const validProducts = productData.filter(
-              product => product && product.id && product.name && typeof product.stock === 'number'
+              product => product && product.id && product.name && typeof product.stock === 'number' && Array.isArray(product.units)
             );
 
             allProducts = [...allProducts, ...validProducts];
-            console.log(`Mengambil ${validProducts.length} produk di halaman ${currentApiPage}, total: ${allProducts.length}`);
-
             lastPage = data.data?.pagination?.last_page || 1;
             success = true;
           } catch (error) {
             retries++;
-            console.error(`Coba ulang ${retries}/${maxRetries} untuk halaman ${currentApiPage}: ${error.message}`);
             if (retries >= maxRetries) {
               throw error;
             }
@@ -256,15 +271,12 @@ export default function InventoryScreen() {
       } while (currentApiPage <= lastPage);
 
       if (allProducts.length === 0) {
-        console.warn('Tidak ada produk valid ditemukan');
         setErrorMessage('Tidak ada produk valid ditemukan');
       } else {
-        console.log(`Total produk yang diambil: ${allProducts.length}`);
         setProducts(allProducts);
-        await clearCache(); // Clear cache to avoid stale data
+        await clearCache();
       }
     } catch (error) {
-      console.error('Gagal mengambil produk:', error.message);
       setErrorMessage(error.message || 'Gagal mengambil data produk');
       Alert.alert('Error', error.message || 'Gagal mengambil data produk');
     } finally {
@@ -313,24 +325,14 @@ export default function InventoryScreen() {
       }
 
       const newProduct = await response.json();
-      console.log('Produk baru ditambahkan:', newProduct.data);
-
-      setProducts(prev => {
-        const updatedProducts = [...prev, newProduct.data];
-        console.log('State products diperbarui:', updatedProducts.length);
-        return updatedProducts;
-      });
+      setProducts(prev => [...prev, ...(Array.isArray(newProduct.data.products) ? newProduct.data.products : [newProduct.data])]);
       setNewItem({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
       setCurrentPage(1);
       setErrorMessage('');
       Alert.alert('Sukses', 'Produk berhasil ditambahkan');
-
-      // Bersihkan cache dan ambil data baru
       await clearCache();
       await fetchAllProducts();
-
     } catch (error) {
-      console.error('Gagal menambah produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal menambah produk');
     }
   }, [newItem, sanitizeString, clearCache, fetchAllProducts]);
@@ -376,22 +378,14 @@ export default function InventoryScreen() {
       }
 
       const updatedProduct = await response.json();
-      setProducts(prev => {
-        const updatedProducts = prev.map(p => (p.id === editItem.id ? updatedProduct.data : p));
-        console.log('State products diperbarui setelah edit:', updatedProducts.length);
-        return updatedProducts;
-      });
+      setProducts(prev => prev.map(p => (p.id === editItem.id ? { ...p, ...updatedProduct.data, units: updatedProduct.data.units || [] } : p)));
       setEditItem(null);
       setCurrentPage(1);
       setErrorMessage('');
       Alert.alert('Sukses', 'Produk berhasil diperbarui');
-
-      // Bersihkan cache dan ambil data baru
       await clearCache();
       await fetchAllProducts();
-
     } catch (error) {
-      console.error('Gagal memperbarui produk:', error.message);
       Alert.alert('Error', error.message || 'Gagal memperbarui produk');
     }
   }, [editItem, sanitizeString, clearCache, fetchAllProducts]);
@@ -429,21 +423,13 @@ export default function InventoryScreen() {
                 throw new Error(`Gagal menghapus produk: ${response.status} ${errorText}`);
               }
 
-              setProducts(prev => {
-                const updatedProducts = prev.filter(p => p.id !== id);
-                console.log('State products diperbarui setelah hapus:', updatedProducts.length);
-                return updatedProducts;
-              });
+              setProducts(prev => prev.filter(p => p.id !== id));
               setCurrentPage(1);
               setErrorMessage('');
               Alert.alert('Sukses', 'Produk berhasil dihapus');
-
-              // Bersihkan cache dan ambil data baru
               await clearCache();
               await fetchAllProducts();
-
             } catch (error) {
-              console.error('Gagal menghapus produk:', error.message);
               Alert.alert('Error', error.message || 'Gagal menghapus produk');
             }
           },
@@ -456,7 +442,6 @@ export default function InventoryScreen() {
   useFocusEffect(
     useCallback(() => {
       const checkAndSync = async () => {
-        console.log('Layar fokus, mengambil data baru');
         await clearCache();
         await fetchAllProducts();
       };
@@ -469,20 +454,22 @@ export default function InventoryScreen() {
     ({ item, index }) => {
       const showBrandHeader = index === 0 || (paginatedProducts[index - 1] && paginatedProducts[index - 1].brand !== item.brand);
       return (
-        <ProductItem
-          item={item}
-          index={(currentPage - 1) * itemsPerPage + index}
-          onEdit={(item) =>
-            setEditItem({
-              ...item,
-              stock: item.stock?.toString() || '0',
-              selling_price: item.selling_price?.toString() || '0',
-              discount_price: item.discount_price?.toString() || '',
-            })
-          }
-          onDelete={handleDeleteItem}
-          showBrandHeader={showBrandHeader}
-        />
+        <View style={styles.tableRowContainer}>
+          <ProductItem
+            item={item}
+            index={(currentPage - 1) * itemsPerPage + index}
+            onEdit={(item) =>
+              setEditItem({
+                ...item,
+                stock: item.stock?.toString() || '0',
+                selling_price: item.selling_price?.toString() || '0',
+                discount_price: item.discount_price?.toString() || '',
+              })
+            }
+            onDelete={handleDeleteItem}
+            showBrandHeader={showBrandHeader}
+          />
+        </View>
       );
     },
     [currentPage, handleDeleteItem, paginatedProducts]
@@ -624,35 +611,40 @@ export default function InventoryScreen() {
         {filteredProducts.length === 0 && !isLoading && !errorMessage ? (
           <Text style={styles.errorText}>Tidak ada produk ditemukan</Text>
         ) : null}
-        <View style={styles.tableHeader}>
-          <Text style={styles.headerText}>No</Text>
-          <Text style={styles.headerText}>Brand</Text>
-          <Text style={styles.headerText}>Model</Text>
-          <Text style={styles.headerText}>Ukuran</Text>
-          <Text style={styles.headerText}>Warna</Text>
-          <Text style={styles.headerText}>Stok</Text>
-          <Text style={styles.headerText}>Fisik</Text>
-          <Text style={styles.headerText}>Harga</Text>
-          <Text style={styles.headerText}>Diskon</Text>
-          <Text style={styles.headerText}>QR</Text>
-          <Text style={styles.headerText}>Aksi</Text>
-        </View>
-        <FlatList
-          data={paginatedProducts}
-          keyExtractor={item => item.id?.toString()}
-          renderItem={renderItem}
-          scrollEnabled={false}
-          initialNumToRender={itemsPerPage}
-          maxToRenderPerBatch={itemsPerPage}
-          windowSize={2}
-          removeClippedSubviews={true}
-          extraData={products}
-          getItemLayout={(data, index) => ({
-            length: 60,
-            offset: 60 * index,
-            index,
-          })}
-        />
+        <ScrollView horizontal={true} showsHorizontalScrollIndicator={true} style={styles.tableScroll}>
+          <View style={styles.tableContent}>
+            <View style={styles.tableHeader}>
+              <Text style={[styles.headerText, styles.headerNo]}>No</Text>
+              <Text style={[styles.headerText, styles.headerBrand]}>Brand</Text>
+              <Text style={[styles.headerText, styles.headerModel]}>Model</Text>
+              <Text style={[styles.headerText, styles.headerSize]}>Ukuran</Text>
+              <Text style={[styles.headerText, styles.headerColor]}>Warna</Text>
+              <Text style={[styles.headerText, styles.headerStock]}>Stok</Text>
+              <Text style={[styles.headerText, styles.headerPhysical]}>Fisik</Text>
+              <Text style={[styles.headerText, styles.headerPrice]}>Harga</Text>
+              <Text style={[styles.headerText, styles.headerDiscount]}>Diskon</Text>
+              <Text style={[styles.headerText, styles.headerUnitCode]}>Kode Unit</Text>
+              <Text style={[styles.headerText, styles.headerQR]}>QR</Text>
+              <Text style={[styles.headerText, styles.headerActions]}>Aksi</Text>
+            </View>
+            <FlatList
+              data={paginatedProducts}
+              keyExtractor={item => item.id?.toString()}
+              renderItem={renderItem}
+              scrollEnabled={false}
+              initialNumToRender={itemsPerPage}
+              maxToRenderPerBatch={itemsPerPage}
+              windowSize={2}
+              removeClippedSubviews={true}
+              extraData={products}
+              getItemLayout={(data, index) => ({
+                length: 60,
+                offset: 60 * index,
+                index,
+              })}
+            />
+          </View>
+        </ScrollView>
         {totalPages > 1 && (
           <View style={styles.paginationContainer}>
             <Button
@@ -770,21 +762,70 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     overflow: 'hidden',
   },
+  tableScroll: {
+    flexGrow: 0,
+  },
+  tableContent: {
+    minWidth: 800, // Ensure table is wide enough for all columns
+  },
   tableHeader: {
     flexDirection: 'row',
     backgroundColor: '#f28c38',
-    padding: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 5,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ccc',
+  },
+  tableRowContainer: {
+    minWidth: 800, // Match tableContent width
   },
   headerText: {
-    flex: 1,
     color: '#000',
     fontWeight: '600',
     textAlign: 'center',
-    fontSize: 10,
+    fontSize: 11,
+    paddingVertical: 5,
+  },
+  headerNo: {
+    width: 50,
+  },
+  headerBrand: {
+    width: 120,
+  },
+  headerModel: {
+    width: 120,
+  },
+  headerSize: {
+    width: 80,
+  },
+  headerColor: {
+    width: 80,
+  },
+  headerStock: {
+    width: 60,
+  },
+  headerPhysical: {
+    width: 60,
+  },
+  headerPrice: {
+    width: 100,
+  },
+  headerDiscount: {
+    width: 100,
+  },
+  headerUnitCode: {
+    width: 80,
+  },
+  headerQR: {
+    width: 60,
+  },
+  headerActions: {
+    width: 100,
   },
   item: {
     flexDirection: 'row',
-    padding: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 5,
     alignItems: 'center',
     minHeight: 60,
   },
@@ -795,14 +836,44 @@ const styles = StyleSheet.create({
     backgroundColor: '#e5e7eb',
   },
   itemText: {
-    flex: 1,
     textAlign: 'center',
-    fontSize: 10,
+    fontSize: 11,
     color: '#000',
+    paddingVertical: 5,
   },
   itemTextContainer: {
-    flex: 1,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  itemNo: {
+    width: 50,
+  },
+  itemBrand: {
+    width: 120,
+  },
+  itemModel: {
+    width: 120,
+  },
+  itemSize: {
+    width: 80,
+  },
+  itemColor: {
+    width: 80,
+  },
+  itemStock: {
+    width: 60,
+  },
+  itemPhysical: {
+    width: 60,
+  },
+  itemPrice: {
+    width: 100,
+  },
+  itemDiscount: {
+    width: 100,
+  },
+  itemUnitCode: {
+    width: 80,
   },
   lowStock: {
     color: '#dc2626',
@@ -810,16 +881,19 @@ const styles = StyleSheet.create({
   qrCode: {
     width: 40,
     height: 40,
+    marginHorizontal: 5,
   },
   actions: {
-    flex: 1,
+    width: 100,
     flexDirection: 'row',
     justifyContent: 'center',
+    alignItems: 'center',
     gap: 8,
   },
   actionText: {
     color: '#2563eb',
-    fontSize: 10,
+    fontSize: 11,
+    textAlign: 'center',
   },
   brandHeader: {
     backgroundColor: '#f28c38',
@@ -827,6 +901,8 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     padding: 8,
     textTransform: 'uppercase',
+    fontSize: 12,
+    minWidth: 800, // Match tableContent width
   },
   errorText: {
     color: '#dc2626',

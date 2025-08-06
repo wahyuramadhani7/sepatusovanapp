@@ -20,8 +20,11 @@
     "date-fns": "^4.1.0",
     "dayjs": "^1.11.13",
     "expo": "~53.0.20",
+    "expo-barcode-scanner": "^13.0.1",
+    "expo-camera": "~16.1.11",
     "expo-linear-gradient": "^14.1.5",
     "expo-status-bar": "~2.2.3",
+    "jsqr": "^1.4.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-native": "0.79.5",
@@ -34,8 +37,7 @@
     "react-native-svg": "^15.12.1",
     "react-native-vision-camera": "^4.7.1",
     "react-native-web": "^0.20.0",
-    "vision-camera-code-scanner": "^0.2.0",
-    "expo-camera": "~16.1.11"
+    "vision-camera-code-scanner": "^0.2.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0"

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,8 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
 import axios from 'axios';
+import { Camera } from 'expo-camera';
+import jsQR from 'jsqr';
 
 const CreateTransactionScreen = ({ navigation }) => {
   const [darkMode, setDarkMode] = useState(false);
@@ -35,12 +37,19 @@ const CreateTransactionScreen = ({ navigation }) => {
   const [popupType, setPopupType] = useState('success');
   const [scannedUnitCodes, setScannedUnitCodes] = useState([]);
   const [showProductDropdown, setShowProductDropdown] = useState(false);
+  const [hasCameraPermission, setHasCameraPermission] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const cameraRef = useRef(null);
 
   useEffect(() => {
     AsyncStorage.getItem('darkMode').then((value) => {
       if (value) setDarkMode(JSON.parse(value));
     });
     fetchUnits();
+    (async () => {
+      const { status } = await Camera.requestCameraPermissionsAsync();
+      setHasCameraPermission(status === 'granted');
+    })();
   }, []);
 
   useEffect(() => {
@@ -92,7 +101,8 @@ const CreateTransactionScreen = ({ navigation }) => {
             product &&
             product.id &&
             product.name &&
-            typeof product.stock === 'number'
+            typeof product.stock === 'number' &&
+            Array.isArray(product.units)
         );
 
         allProducts = [...allProducts, ...validProducts];
@@ -103,18 +113,34 @@ const CreateTransactionScreen = ({ navigation }) => {
       if (allProducts.length === 0) {
         setErrorMessage('Tidak ada produk tersedia dari API.');
       } else {
-        const mappedProducts = allProducts.map((product) => ({
-          product_id: product.id,
-          product_name: product.name,
-          color: product.color || '-',
-          size: product.size || '-',
-          selling_price: parseFloat(product.selling_price) || 0,
-          discount_price: product.discount_price
-            ? parseFloat(product.discount_price)
-            : null,
-          unit_code: product.unit_code || `UNIT-${product.id}`,
-          stock: product.stock || 0,
-        }));
+        const mappedProducts = allProducts.flatMap((product) => {
+          const units = product.units || [];
+          return units.length > 0
+            ? units.map((unit) => ({
+                product_id: product.id,
+                product_name: product.name,
+                color: product.color || '-',
+                size: product.size || '-',
+                selling_price: parseFloat(product.selling_price) || 0,
+                discount_price: product.discount_price
+                  ? parseFloat(product.discount_price)
+                  : null,
+                unit_code: unit.unit_code || `UNIT-${product.id}`,
+                stock: product.stock || 0,
+              }))
+            : [{
+                product_id: product.id,
+                product_name: product.name,
+                color: product.color || '-',
+                size: product.size || '-',
+                selling_price: parseFloat(product.selling_price) || 0,
+                discount_price: product.discount_price
+                  ? parseFloat(product.discount_price)
+                  : null,
+                unit_code: `UNIT-${product.id}`,
+                stock: product.stock || 0,
+              }];
+        });
         setAvailableUnits(mappedProducts);
         setSearchResults([]);
         console.log('Mapped Products:', JSON.stringify(mappedProducts, null, 2));
@@ -201,6 +227,43 @@ const CreateTransactionScreen = ({ navigation }) => {
       'success'
     );
     setShowProductDropdown(false);
+    setScanning(false);
+  };
+
+  const handleFrameProcessor = async () => {
+    if (!scanning || !cameraRef.current) return;
+    try {
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.5 });
+      const response = await fetch(photo.uri);
+      const blob = await response.blob();
+      const img = new Image();
+      img.src = URL.createObjectURL(blob);
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, img.width, img.height);
+        const imageData = ctx.getImageData(0, 0, img.width, img.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code) {
+          console.log(`Scanned QR code: ${code.data}`);
+          const scannedUnit = availableUnits.find((unit) => unit.unit_code === code.data);
+          if (scannedUnit) {
+            addToCart(scannedUnit);
+          } else {
+            showPopupMessage(
+              'Unit Tidak Ditemukan',
+              `Kode unit "${code.data}" tidak ditemukan.`,
+              'error'
+            );
+            setScanning(false);
+          }
+        }
+      };
+    } catch (error) {
+      console.error('Frame processing error:', error);
+    }
   };
 
   const removeItem = (index) => {
@@ -373,7 +436,7 @@ const CreateTransactionScreen = ({ navigation }) => {
           {item.product_name || 'Nama tidak tersedia'}
         </Text>
         <Text style={[styles.text, darkMode && styles.textDark, styles.productDetails]}>
-          {item.color || '-'}, Ukuran: {item.size || '-'}, Kode: {item.unit_code || '-'}
+          Warna: {item.color || '-'}, Ukuran: {item.size || '-'}, Kode: {item.unit_code || '-'}
         </Text>
         <Text style={[styles.text, darkMode && styles.textDark, styles.productStock]}>
           Stok: {item.stock || 0}
@@ -407,7 +470,7 @@ const CreateTransactionScreen = ({ navigation }) => {
       </TouchableOpacity>
       <Text style={[styles.text, darkMode && styles.textDark]}>{item.name}</Text>
       <Text style={[styles.text, darkMode && styles.textDark]}>
-        {item.color}, Ukuran: {item.size}, Kode: {item.unit_code}
+        Warna: {item.color}, Ukuran: {item.size}, Kode: {item.unit_code}
       </Text>
       <Text style={[styles.text, darkMode && styles.textDark]}>
         {item.discount_price
@@ -467,7 +530,33 @@ const CreateTransactionScreen = ({ navigation }) => {
           activeOpacity={0.7}
         >
           <Text style={[styles.text, darkMode && styles.textDark]}>
-            {showProductDropdown ? 'Tutup Daftar Produk' : 'Pilih Produk'}
+            Cari Produk Manual
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.dropdownButton, darkMode && styles.dropdownButtonDark]}
+          onPress={() => {
+            if (hasCameraPermission === null) {
+              showPopupMessage(
+                'Menunggu Izin Kamera',
+                'Sedang memeriksa izin kamera...',
+                'error'
+              );
+            } else if (hasCameraPermission === false) {
+              showPopupMessage(
+                'Izin Kamera Ditolak',
+                'Aplikasi membutuhkan akses kamera untuk memindai kode unit. Silakan izinkan akses kamera di pengaturan perangkat.',
+                'error'
+              );
+            } else {
+              console.log('Opening scanner');
+              setScanning(true);
+            }
+          }}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.text, darkMode && styles.textDark]}>
+            Scan Kode Unit
           </Text>
         </TouchableOpacity>
         <Modal
@@ -609,7 +698,7 @@ const CreateTransactionScreen = ({ navigation }) => {
               Keranjang Kosong
             </Text>
             <Text style={[styles.text, darkMode && styles.textDark]}>
-              Tambahkan unit produk dari daftar di atas
+              Tambahkan unit produk dari daftar atau scan kode unit
             </Text>
           </View>
         ) : (
@@ -687,14 +776,41 @@ const CreateTransactionScreen = ({ navigation }) => {
 
   return (
     <SafeAreaView style={[styles.container, darkMode && styles.containerDark]}>
-      <FlatList
-        data={[]}
-        renderItem={() => null}
-        keyExtractor={(item, index) => index.toString()}
-        ListHeaderComponent={renderHeader}
-        ListFooterComponent={<View style={{ height: 20 }} />}
-        nestedScrollEnabled={true}
-      />
+      {scanning ? (
+        <View style={{ flex: 1 }}>
+          <Camera
+            style={{ flex: 1 }}
+            ref={cameraRef}
+            onCameraReady={() => {
+              setInterval(handleFrameProcessor, 1000);
+            }}
+          />
+          <View style={styles.scannerOverlay}>
+            <Text style={styles.scannerInstruction}>
+              Arahkan kamera ke kode QR unit
+            </Text>
+            <View style={styles.scannerFrame} />
+          </View>
+          <TouchableOpacity
+            style={[styles.button, darkMode && styles.buttonDark, styles.cancelButton]}
+            onPress={() => {
+              console.log('Cancel scan pressed');
+              setScanning(false);
+            }}
+          >
+            <Text style={styles.buttonText}>Batal</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <FlatList
+          data={[]}
+          renderItem={() => null}
+          keyExtractor={(item, index) => index.toString()}
+          ListHeaderComponent={renderHeader}
+          ListFooterComponent={<View style={{ height: 20 }} />}
+          nestedScrollEnabled={true}
+        />
+      )}
       <Modal visible={showPopup} transparent animationType="fade">
         <View style={styles.modal}>
           <View style={[styles.card, darkMode && styles.cardDark]}>
@@ -882,6 +998,38 @@ const styles = StyleSheet.create({
   emptyText: {
     textAlign: 'center',
     padding: 16,
+  },
+  scannerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  scannerFrame: {
+    width: 250,
+    height: 250,
+    borderWidth: 2,
+    borderColor: '#FF6B35',
+    borderRadius: 10,
+    backgroundColor: 'transparent',
+  },
+  scannerInstruction: {
+    position: 'absolute',
+    top: 20,
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  cancelButton: {
+    position: 'absolute',
+    bottom: 20,
+    alignSelf: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
   },
 });
 
