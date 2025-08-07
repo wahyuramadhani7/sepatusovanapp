@@ -3,7 +3,6 @@ import {
   View,
   Text,
   TextInput,
-  Button,
   FlatList,
   StyleSheet,
   Alert,
@@ -11,6 +10,7 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { debounce } from 'lodash';
@@ -19,6 +19,8 @@ import { Picker } from '@react-native-picker/picker';
 
 // Komponen untuk item produk dengan memoization
 const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader }) => {
+  const [showQR, setShowQR] = useState(false); // State to toggle QR code and unit code
+
   if (!item || !item.name || !item.id) {
     console.warn('Item produk tidak valid:', item);
     return null;
@@ -34,19 +36,18 @@ const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader
   const isValidUrl = (url) => {
     try {
       new URL(url);
-      return url.match(/\.(png|jpg|jpeg)$/i) !== null;
+      return true;
     } catch {
       return false;
     }
   };
 
-  // Gunakan unit.qr_code jika valid, fallback ke API QR code
-  const qrCodeUrl = unit.qr_code && isValidUrl(unit.qr_code)
-    ? `${unit.qr_code}?t=${Date.now()}`
-    : `https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(
-        `http://192.168.1.6:8000/inventory/${item.id}`
-      )}&t=${Date.now()}`;
+  // Gunakan unit.qr_code jika valid, fallback ke URL dengan format yang sama
   const unitCode = unit.unit_code || '-';
+  const qrCodeData = unit.qr_code && isValidUrl(unit.qr_code)
+    ? unit.qr_code
+    : `http://192.168.1.6:8000/inventory/${item.id}/unit/${unitCode}`;
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=${encodeURIComponent(qrCodeData)}&t=${Date.now()}`;
 
   return (
     <View>
@@ -69,23 +70,30 @@ const ProductItem = React.memo(({ item, index, onEdit, onDelete, showBrandHeader
         <Text style={[styles.itemText, styles.itemDiscount]} numberOfLines={1} ellipsizeMode="tail">
           {item.discount_price ? `Rp ${new Intl.NumberFormat('id-ID').format(parseFloat(item.discount_price))}` : '-'}
         </Text>
-        <Text style={[styles.itemText, styles.itemUnitCode]} numberOfLines={1} ellipsizeMode="tail">{unitCode}</Text>
-        <Image
-          source={{ uri: qrCodeUrl }}
-          style={styles.qrCode}
-          onError={(e) => {
-            console.error(`Gagal memuat QR code untuk produk ${item.id}: ${e.nativeEvent.error}`);
-          }}
-        />
+        <TouchableOpacity onPress={() => setShowQR(!showQR)} style={styles.qrToggle}>
+          <Text style={styles.qrToggleText}>{showQR ? 'Sembunyikan QR' : 'Tampilkan QR'}</Text>
+        </TouchableOpacity>
         <View style={styles.actions}>
           <TouchableOpacity onPress={() => onEdit(item)}>
             <Text style={styles.actionText}>Edit</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={() => onDelete(item.id)}>
-            <Text style={[styles.actionText, { color: '#d9534f' }]}>Hapus</Text>
+            <Text style={[styles.actionText, { color: '#ef4444' }]}>Hapus</Text>
           </TouchableOpacity>
         </View>
       </View>
+      {showQR && (
+        <View style={styles.qrContainer}>
+          <Text style={styles.qrUnitCode}>Kode Unit: {unitCode}</Text>
+          <Image
+            source={{ uri: qrCodeUrl }}
+            style={styles.qrCode}
+            onError={(e) => {
+              console.error(`Gagal memuat QR code untuk produk ${item.id}: ${e.nativeEvent.error}`);
+            }}
+          />
+        </View>
+      )}
     </View>
   );
 });
@@ -94,7 +102,6 @@ export default function InventoryScreen() {
   const [products, setProducts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [sizeTerm, setSizeTerm] = useState('');
-  const [newItem, setNewItem] = useState({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
   const [editItem, setEditItem] = useState(null);
   const [brandCounts, setBrandCounts] = useState({});
   const [selectedBrand, setSelectedBrand] = useState('all');
@@ -283,59 +290,6 @@ export default function InventoryScreen() {
       setIsLoading(false);
     }
   }, [clearCache]);
-
-  // Tambah produk baru
-  const handleAddItem = useCallback(async () => {
-    try {
-      if (!newItem.name || !newItem.stock || !newItem.selling_price) {
-        Alert.alert('Error', 'Nama, stok, dan harga jual wajib diisi');
-        return;
-      }
-
-      const token = await AsyncStorage.getItem('token');
-      if (!token) {
-        Alert.alert('Error', 'Silakan login terlebih dahulu');
-        return;
-      }
-
-      const [brand, ...modelParts] = sanitizeString(newItem.name).split(' ');
-      const model = modelParts.join(' ') || '';
-
-      const response = await fetch('http://192.168.1.6:8000/api/products/', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-        body: JSON.stringify({
-          brand: brand || 'Unknown',
-          model: model || '',
-          sizes: [{ size: sanitizeString(newItem.size) || 'N/A', stock: parseInt(newItem.stock) || 0 }],
-          color: sanitizeString(newItem.color) || null,
-          selling_price: parseFloat(newItem.selling_price) || 0,
-          discount_price: newItem.discount_price ? parseFloat(newItem.discount_price) : null,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gagal menambah produk: ${response.status} ${errorText}`);
-      }
-
-      const newProduct = await response.json();
-      setProducts(prev => [...prev, ...(Array.isArray(newProduct.data.products) ? newProduct.data.products : [newProduct.data])]);
-      setNewItem({ name: '', stock: '', size: '', color: '', selling_price: '', discount_price: '' });
-      setCurrentPage(1);
-      setErrorMessage('');
-      Alert.alert('Sukses', 'Produk berhasil ditambahkan');
-      await clearCache();
-      await fetchAllProducts();
-    } catch (error) {
-      Alert.alert('Error', error.message || 'Gagal menambah produk');
-    }
-  }, [newItem, sanitizeString, clearCache, fetchAllProducts]);
 
   // Perbarui produk
   const handleUpdateItem = useCallback(async () => {
@@ -542,74 +496,89 @@ export default function InventoryScreen() {
             setCurrentPage(1);
           }}
         />
-        <Button title="Cari" onPress={handleSearch} color="#f28c38" />
-        <Button
-          title="Refresh Produk"
+        <TouchableOpacity style={styles.actionButton} onPress={handleSearch}>
+          <Text style={styles.actionButtonText}>Cari</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.actionButton}
           onPress={async () => {
             setIsLoading(true);
             await clearCache();
             await fetchAllProducts();
             setIsLoading(false);
           }}
-          color="#f28c38"
-        />
+        >
+          <Text style={styles.actionButtonText}>Refresh Produk</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Form Tambah/Edit */}
-      <View style={styles.form}>
-        <TextInput
-          style={styles.input}
-          placeholder="Nama Produk (Brand Model)"
-          value={editItem ? editItem.name : newItem.name}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, name: text }) : setNewItem({ ...newItem, name: text }))}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Stok"
-          keyboardType="numeric"
-          value={editItem ? editItem.stock : newItem.stock}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, stock: text }) : setNewItem({ ...newItem, stock: text }))}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Ukuran"
-          value={editItem ? editItem.size : newItem.size}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, size: text }) : setNewItem({ ...newItem, size: text }))}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Warna"
-          value={editItem ? editItem.color : newItem.color}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, color: text }) : setNewItem({ ...newItem, color: text }))}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Harga Jual"
-          keyboardType="numeric"
-          value={editItem ? editItem.selling_price : newItem.selling_price}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, selling_price: text }) : setNewItem({ ...newItem, selling_price: text }))}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Harga Diskon"
-          keyboardType="numeric"
-          value={editItem ? editItem.discount_price : newItem.discount_price}
-          onChangeText={text => (editItem ? setEditItem({ ...editItem, discount_price: text }) : setNewItem({ ...newItem, discount_price: text }))}
-        />
-        <Button
-          title={editItem ? 'Simpan Perubahan' : 'Tambah Produk'}
-          onPress={editItem ? handleUpdateItem : handleAddItem}
-          color="#f28c38"
-        />
-        {editItem && <Button title="Batal" color="gray" onPress={() => setEditItem(null)} />}
-      </View>
+      {/* Form Edit */}
+      {editItem && (
+        <View style={styles.form}>
+          <TextInput
+            style={styles.input}
+            placeholder="Nama Produk (Brand Model)"
+            value={editItem.name}
+            onChangeText={text => setEditItem({ ...editItem, name: text })}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Stok"
+            keyboardType="numeric"
+            value={editItem.stock}
+            onChangeText={text => setEditItem({ ...editItem, stock: text })}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Ukuran"
+            value={editItem.size}
+            onChangeText={text => setEditItem({ ...editItem, size: text })}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Warna"
+            value={editItem.color}
+            onChangeText={text => setEditItem({ ...editItem, color: text })}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Harga Jual"
+            keyboardType="numeric"
+            value={editItem.selling_price}
+            onChangeText={text => setEditItem({ ...editItem, selling_price: text })}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Harga Diskon"
+            keyboardType="numeric"
+            value={editItem.discount_price}
+            onChangeText={text => setEditItem({ ...editItem, discount_price: text })}
+          />
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={handleUpdateItem}
+          >
+            <Text style={styles.actionButtonText}>Simpan Perubahan</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.actionButton, styles.cancelButton]} onPress={() => setEditItem(null)}>
+            <Text style={styles.actionButtonText}>Batal</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Daftar Produk dan Pagination */}
       <View style={styles.tableContainer}>
-        {isLoading && <ActivityIndicator size="large" color="#f28c38" />}
+        {isLoading && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#f97316" />
+            <Text style={styles.loadingText}>Memuat produk...</Text>
+          </View>
+        )}
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         {filteredProducts.length === 0 && !isLoading && !errorMessage ? (
-          <Text style={styles.errorText}>Tidak ada produk ditemukan</Text>
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>Tidak ada produk ditemukan</Text>
+          </View>
         ) : null}
         <ScrollView horizontal={true} showsHorizontalScrollIndicator={true} style={styles.tableScroll}>
           <View style={styles.tableContent}>
@@ -623,7 +592,6 @@ export default function InventoryScreen() {
               <Text style={[styles.headerText, styles.headerPhysical]}>Fisik</Text>
               <Text style={[styles.headerText, styles.headerPrice]}>Harga</Text>
               <Text style={[styles.headerText, styles.headerDiscount]}>Diskon</Text>
-              <Text style={[styles.headerText, styles.headerUnitCode]}>Kode Unit</Text>
               <Text style={[styles.headerText, styles.headerQR]}>QR</Text>
               <Text style={[styles.headerText, styles.headerActions]}>Aksi</Text>
             </View>
@@ -647,21 +615,23 @@ export default function InventoryScreen() {
         </ScrollView>
         {totalPages > 1 && (
           <View style={styles.paginationContainer}>
-            <Button
-              title="Sebelumnya"
-              disabled={currentPage === 1}
+            <TouchableOpacity
+              style={[styles.pageButton, currentPage === 1 && styles.disabledButton]}
               onPress={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-              color="#f28c38"
-            />
+              disabled={currentPage === 1}
+            >
+              <Text style={[styles.pageButtonText, currentPage === 1 && { color: '#ccc' }]}>Sebelumnya</Text>
+            </TouchableOpacity>
             <Text style={styles.paginationText}>
               Halaman {currentPage} dari {totalPages}
             </Text>
-            <Button
-              title="Selanjutnya"
-              disabled={currentPage === totalPages}
+            <TouchableOpacity
+              style={[styles.pageButton, currentPage === totalPages && styles.disabledButton]}
               onPress={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-              color="#f28c38"
-            />
+              disabled={currentPage === totalPages}
+            >
+              <Text style={[styles.pageButtonText, currentPage === totalPages && { color: '#ccc' }]}>Selanjutnya</Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -672,31 +642,33 @@ export default function InventoryScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 10,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f5f5f5', // Light background
+    padding: 16,
   },
   title: {
     fontSize: 20,
     fontWeight: 'bold',
-    backgroundColor: '#f28c38',
     color: '#000',
-    padding: 10,
-    borderRadius: 5,
+    backgroundColor: '#f97316', // Orange header
+    padding: 16,
+    borderRadius: 8,
     textAlign: 'center',
-    marginBottom: 10,
+    marginBottom: 16,
+    textTransform: 'uppercase',
   },
   infoContainer: {
-    backgroundColor: '#333',
-    padding: 10,
-    borderRadius: 5,
-    marginBottom: 10,
+    backgroundColor: '#292929', // Dark container
+    padding: 16,
+    borderRadius: 8,
+    marginBottom: 16,
   },
   infoTitle: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '600',
     color: '#fff',
     textAlign: 'center',
-    marginBottom: 10,
+    marginBottom: 16,
+    textTransform: 'uppercase',
   },
   infoGrid: {
     flexDirection: 'row',
@@ -704,87 +676,109 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   infoCard: {
-    backgroundColor: '#e5e7eb',
-    padding: 10,
-    borderRadius: 5,
-    width: '48%',
-    marginBottom: 10,
+    backgroundColor: '#f3f4f6', // Light card background
+    padding: 16,
+    borderRadius: 8,
+    width: (Dimensions.get('window').width - 48) / 2 - 8, // Responsive width using Dimensions
+    marginBottom: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#f97316', // Orange accent
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
   infoCardTitle: {
     fontSize: 12,
     fontWeight: '600',
+    color: '#666',
     textTransform: 'uppercase',
   },
   infoCardValue: {
-    fontSize: 14,
-    color: '#4b5563',
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginTop: 2,
   },
   pickerContainer: {
-    marginTop: 5,
+    marginTop: 8,
   },
   picker: {
     backgroundColor: '#fff',
-    borderRadius: 5,
+    borderRadius: 8,
     height: 40,
+    color: '#333',
   },
   searchContainer: {
-    backgroundColor: '#333',
-    padding: 10,
-    borderRadius: 5,
-    marginBottom: 10,
+    backgroundColor: '#292929', // Dark container
+    padding: 16,
+    borderRadius: 8,
+    marginBottom: 16,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 5,
+    gap: 8,
   },
   searchInput: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    padding: 8,
-    borderRadius: 5,
     backgroundColor: '#fff',
-    marginRight: 5,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#333',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    marginRight: 8,
     minWidth: 120,
   },
   form: {
-    marginBottom: 10,
+    backgroundColor: '#292929', // Dark container
+    padding: 16,
+    borderRadius: 8,
+    marginBottom: 16,
   },
   input: {
-    borderWidth: 1,
-    borderColor: '#ccc',
-    padding: 8,
-    marginBottom: 5,
-    borderRadius: 5,
     backgroundColor: '#fff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#333',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    marginBottom: 8,
   },
   tableContainer: {
-    backgroundColor: '#333',
-    borderRadius: 5,
-    overflow: 'hidden',
+    backgroundColor: '#292929', // Dark container
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
   },
   tableScroll: {
     flexGrow: 0,
   },
   tableContent: {
-    minWidth: 800, // Ensure table is wide enough for all columns
+    minWidth: 720, // Adjusted to account for removed unit code column
   },
   tableHeader: {
     flexDirection: 'row',
-    backgroundColor: '#f28c38',
-    paddingVertical: 10,
-    paddingHorizontal: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ccc',
+    backgroundColor: '#f97316', // Orange header
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    marginBottom: 8,
   },
   tableRowContainer: {
-    minWidth: 800, // Match tableContent width
+    minWidth: 720, // Match tableContent width
   },
   headerText: {
     color: '#000',
     fontWeight: '600',
     textAlign: 'center',
-    fontSize: 11,
-    paddingVertical: 5,
+    fontSize: 12,
+    paddingVertical: 8,
+    textTransform: 'uppercase',
   },
   headerNo: {
     width: 50,
@@ -813,33 +807,37 @@ const styles = StyleSheet.create({
   headerDiscount: {
     width: 100,
   },
-  headerUnitCode: {
-    width: 80,
-  },
   headerQR: {
-    width: 60,
+    width: 100,
   },
   headerActions: {
     width: 100,
   },
   item: {
     flexDirection: 'row',
-    paddingVertical: 10,
-    paddingHorizontal: 5,
+    backgroundColor: '#fff', // White card
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    marginBottom: 8,
     alignItems: 'center',
-    minHeight: 60,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
   itemEven: {
     backgroundColor: '#fff',
   },
   itemOdd: {
-    backgroundColor: '#e5e7eb',
+    backgroundColor: '#f3f4f6', // Slightly darker for alternating rows
   },
   itemText: {
     textAlign: 'center',
-    fontSize: 11,
-    color: '#000',
-    paddingVertical: 5,
+    fontSize: 12,
+    color: '#333',
+    paddingVertical: 8,
   },
   itemTextContainer: {
     alignItems: 'center',
@@ -872,52 +870,124 @@ const styles = StyleSheet.create({
   itemDiscount: {
     width: 100,
   },
-  itemUnitCode: {
-    width: 80,
+  qrToggle: {
+    width: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  lowStock: {
-    color: '#dc2626',
-  },
-  qrCode: {
-    width: 40,
-    height: 40,
-    marginHorizontal: 5,
+  qrToggleText: {
+    color: '#3b82f6',
+    fontSize: 12,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   actions: {
     width: 100,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
   },
   actionText: {
-    color: '#2563eb',
-    fontSize: 11,
+    color: '#3b82f6', // Blue for edit
+    fontSize: 12,
+    fontWeight: '500',
     textAlign: 'center',
   },
   brandHeader: {
-    backgroundColor: '#f28c38',
+    backgroundColor: '#f97316', // Orange header
     color: '#000',
     fontWeight: '600',
-    padding: 8,
+    padding: 12,
     textTransform: 'uppercase',
     fontSize: 12,
-    minWidth: 800, // Match tableContent width
+    borderRadius: 8,
+    marginBottom: 8,
+    minWidth: 720, // Adjusted to match tableContent
   },
   errorText: {
-    color: '#dc2626',
+    color: '#ef4444', // Red for errors
     textAlign: 'center',
     marginVertical: 10,
     fontSize: 14,
+  },
+  loadingContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  loadingText: {
+    marginTop: 8,
+    fontSize: 14,
+    color: '#666',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  emptyText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
   },
   paginationContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 10,
+    paddingVertical: 16,
+  },
+  pageButton: {
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: '#f97316', // Orange button
+  },
+  disabledButton: {
+    backgroundColor: '#ccc',
+  },
+  pageButtonText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '500',
   },
   paginationText: {
     fontSize: 14,
     color: '#fff',
+  },
+  actionButton: {
+    backgroundColor: '#f97316', // Orange button
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  cancelButton: {
+    backgroundColor: '#6b7280', // Gray for cancel
+  },
+  actionButtonText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  qrContainer: {
+    alignItems: 'center',
+    padding: 10,
+    backgroundColor: '#f3f4f6',
+    borderRadius: 8,
+    marginBottom: 8,
+    marginHorizontal: 8,
+  },
+  qrUnitCode: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#333',
+    marginBottom: 8,
+  },
+  qrCode: {
+    width: 100,
+    height: 100,
+    marginHorizontal: 5,
   },
 });
